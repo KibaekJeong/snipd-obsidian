@@ -1,4 +1,4 @@
-import { App, Notice, normalizePath, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, normalizePath, PluginSettingTab, Setting, Platform } from 'obsidian';
 import type SnipdPlugin from './main';
 import { FormattingConfigModal } from './formatting_modal';
 import { DEFAULT_SETTINGS } from './types';
@@ -30,6 +30,18 @@ export class SnipdSettingModal extends PluginSettingTab {
     });
   }
 
+  openExternal(url: string) {
+    if (!Platform.isDesktopApp) {
+      // mobile/web: just fall back to window.open
+      window.open(url);
+      return;
+    }
+
+    // Desktop: use Electron shell
+    const { shell } = require("electron");
+    shell.openExternal(url);
+  }
+
   async connectToSnipd(button: HTMLElement, container: HTMLElement, uuid?: string): Promise<void> {
     if (!uuid) {
       uuid = this.generateUUIDv4();
@@ -37,7 +49,7 @@ export class SnipdSettingModal extends PluginSettingTab {
 
     container.empty();
     container.style.display = 'none';
-    window.open(`${AUTH_URL}?uuid=${uuid}`);
+    this.openExternal(`${AUTH_URL}?uuid=${uuid}`);
 
     let response, data: { token?: string };
 
