@@ -1,9 +1,9 @@
 {
 	"id": "snipd-official",
 	"name": "Snipd Official",
-	"version": "1.2.2",
+	"version": "1.2.3",
 	"minAppVersion": "0.15.0",
-	"description": "Official Snipd integration. Sync your podcast highlights (snips) to your Obsidian vault with transcript, notes, ai summary and metadata.",
+	"description": "Official Snipd integration. Sync your podcast highlights (snips) to your vault with transcript, notes, ai summary and metadata.",
 	"author": "Snipd",
 	"authorUrl": "https://snipd.com",
 	"isDesktopOnly": false
