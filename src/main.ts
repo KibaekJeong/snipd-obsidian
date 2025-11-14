@@ -864,12 +864,9 @@ export default class SnipdPlugin extends Plugin {
       const blob = new Blob([arrayBuffer]);
       const blobReader = new zip.BlobReader(blob);
       zipReader = new zip.ZipReader(blobReader);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
       const entries = await zipReader.getEntries();
 
       for (const entry of entries) {
-        // @ts-ignore - zip.js types are incomplete
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const zipEntry: zip.Entry = entry;
         if (zipEntry.directory) {
           continue;
@@ -988,12 +985,9 @@ export default class SnipdPlugin extends Plugin {
       const blob = new Blob([arrayBuffer]);
       const blobReader = new zip.BlobReader(blob);
       zipReader = new zip.ZipReader(blobReader);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
       const entries = await zipReader.getEntries();
 
       for (const entry of entries) {
-        // @ts-ignore - zip.js types are incomplete
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         const zipEntry: zip.Entry = entry;
         if (zipEntry.directory) {
           continue;
@@ -1096,7 +1090,7 @@ export default class SnipdPlugin extends Plugin {
 
   async onload() {
     addIcon('snipd', `<path d="M30.458 18.725c-14.395 13.692-14.395 35.75 0 49.446L16.667 81.279c14.57 13.85 38.308 13.85 52.875 0 14.391-13.691 14.391-35.75 0-49.437l13.791-13.117c-14.57-13.854-38.308-13.854-52.875 0" stroke="#B2B2B2FF" stroke-width="8.33333" fill="none"/>`);
-    this.addRibbonIcon('snipd', 'Open Snipd Base', () => {
+    this.addRibbonIcon('snipd', 'Open Snipd base', () => {
       void this.openBaseFile();
     });
 

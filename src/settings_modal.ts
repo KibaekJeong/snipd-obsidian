@@ -234,7 +234,7 @@ export class SnipdSettingModal extends PluginSettingTab {
       .addDropdown(dropdown => {
         dropdown.addOption("0", "Manual");
         if(isDev()) {
-          dropdown.addOption("1", "Every 1 minute (DEV ONLY)");
+          dropdown.addOption("1", "Every 1 minute (dev only)");
         }
         dropdown.addOption("60", "Every 1 hour");
         dropdown.addOption((12 * 60).toString(), "Every 12 hours");
