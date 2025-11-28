@@ -1,4 +1,4 @@
-import { App, Notice, normalizePath, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import { App, Notice, normalizePath, PluginSettingTab, Setting, requestUrl, TextComponent } from 'obsidian';
 import type SnipdPlugin from './main';
 import { FormattingConfigModal } from './formatting_modal';
 import { DEFAULT_SETTINGS } from './types';
@@ -209,16 +209,43 @@ export class SnipdSettingModal extends PluginSettingTab {
 
     ;
 
+    let pageFolderText: TextComponent | null = null;
+
     new Setting(containerEl)
       .setName('Base folder')
-      .setDesc('Folder where Snipd content will be saved')
-      .addText(text => text
-        .setPlaceholder('Snipd')
-        .setValue(this.plugin.settings.snipdDir)
-        .onChange(async (value) => {
-          this.plugin.settings.snipdDir = normalizePath(value || "Snipd");
-          await this.plugin.saveSettings();
-        }));
+      .setDesc('Folder where the Snipd Base file and metadata will be saved')
+      .addText(text => {
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.baseFolder)
+          .setValue(this.plugin.getBaseFolder())
+          .onChange(async (value) => {
+            const normalized = normalizePath(value || DEFAULT_SETTINGS.baseFolder);
+            this.plugin.settings.baseFolder = normalized;
+            this.plugin.settings.snipdDir = normalized;
+            if (!this.plugin.settings.pageFolder && pageFolderText) {
+              pageFolderText.setPlaceholder(this.plugin.getPageFolder());
+            }
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Episode pages folder')
+      .setDesc('Folder where Snipd episode pages will be saved. Leave empty to use the base folder with /Data.')
+      .addText(text => {
+        pageFolderText = text;
+        text
+          .setPlaceholder(this.plugin.getPageFolder())
+          .setValue(this.plugin.settings.pageFolder)
+          .onChange(async (value) => {
+            const trimmed = value.trim();
+            this.plugin.settings.pageFolder = trimmed ? normalizePath(trimmed) : "";
+            if (!trimmed && pageFolderText) {
+              pageFolderText.setPlaceholder(this.plugin.getPageFolder());
+            }
+            await this.plugin.saveSettings();
+          });
+      });
 
     new Setting(containerEl)
       .setName('Sync frequency')
@@ -280,7 +307,7 @@ export class SnipdSettingModal extends PluginSettingTab {
 
     const testSyncDesc = this.plugin.settings.isTestSyncing 
       ? "Test sync in progress..." 
-      : "Test the sync with 5 random episodes from your snips to validate your configuration. The result will be saved in the configured Base folder with a -TEST suffix.";
+      : "Test the sync with 5 random episodes from your snips to validate your configuration. The result will be saved in your configured folders with a -TEST suffix.";
     
     new Setting(containerEl)
       .setName("Test sync 5 random episodes")

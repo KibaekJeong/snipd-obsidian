@@ -37,6 +37,27 @@ export default class SnipdPlugin extends Plugin {
   settingsTab: SnipdSettingModal | null = null;
   syncAbortController: AbortController | null = null;
 
+  getBaseFolder(): string {
+    const folder = this.settings.baseFolder?.trim() || this.settings.snipdDir || DEFAULT_SETTINGS.baseFolder;
+    return normalizePath(folder);
+  }
+
+  getPageFolder(): string {
+    const folder = this.settings.pageFolder?.trim();
+    if (folder) {
+      return normalizePath(folder);
+    }
+    return normalizePath(`${this.getBaseFolder()}/Data`);
+  }
+
+  private deriveTestPageFolder(baseFolder: string, pageFolder: string): string {
+    if (pageFolder.startsWith(baseFolder)) {
+      const suffix = pageFolder.slice(baseFolder.length);
+      return normalizePath(`${baseFolder}-TEST${suffix}`);
+    }
+    return normalizePath(`${pageFolder}-TEST`);
+  }
+
   async handleSyncError(msg: string) {
     await this.clearSettingsAfterRun();
     this.notice(msg, true, 4, true);
@@ -105,7 +126,7 @@ export default class SnipdPlugin extends Plugin {
   }
 
   async checkSnipdDirectoryExists(): Promise<boolean> {
-    return await this.app.vault.adapter.exists(this.settings.snipdDir);
+    return await this.app.vault.adapter.exists(this.getPageFolder());
   }
 
   async clearSyncMetadata() {
@@ -167,8 +188,8 @@ export default class SnipdPlugin extends Plugin {
   private async checkAndHandleMissingDirectory(): Promise<void> {
     const snipdDirExists = await this.checkSnipdDirectoryExists();
     if (!snipdDirExists && (this.settings.fileHashMap && Object.keys(this.settings.fileHashMap).length > 0)) {
-      debugLog('Snipd plugin: Snipd directory not found, clearing metadata and starting fresh sync');
-      this.notice("Snipd base folder not found, starting fresh sync...", true);
+      debugLog('Snipd plugin: Snipd pages directory not found, clearing metadata and starting fresh sync');
+      this.notice("Snipd pages folder not found, starting fresh sync...", true);
       await this.clearSyncMetadata();
     }
   }
@@ -250,7 +271,7 @@ export default class SnipdPlugin extends Plugin {
       
       if (metadata.episode_batch_count > 0) {
         this.setStatusBarPersistentMessage(`Syncing ${metadata.episode_batch_count} batch${metadata.episode_batch_count > 1 ? 'es' : ''}...`);
-        await this.fetchAndSaveBaseFile(this.settings.snipdDir);
+        await this.fetchAndSaveBaseFile(this.getBaseFolder());
       }
       
       return metadata;
@@ -324,8 +345,8 @@ export default class SnipdPlugin extends Plugin {
   ): Promise<{ episodeCount: number; snipCount: number } | null> {
     const snipdDirExists = await this.checkSnipdDirectoryExists();
     if (!snipdDirExists && (this.settings.fileHashMap && Object.keys(this.settings.fileHashMap).length > 0)) {
-      debugLog('Snipd plugin: Snipd directory not found during batch processing, restarting sync from scratch');
-      this.notice("Snipd folder not found, restarting sync from scratch...", true);
+      debugLog('Snipd plugin: Snipd pages directory not found during batch processing, restarting sync from scratch');
+      this.notice("Snipd pages folder not found, restarting sync from scratch...", true);
       await this.clearSyncMetadata();
       await this.clearSettingsAfterRun();
       await this.syncSnipd();
@@ -475,13 +496,22 @@ export default class SnipdPlugin extends Plugin {
     this.setStatusBarPersistentMessage("Test sync in progress...");
 
     const debugFolderPath = this.settings.saveDebugZips ? `snipd_plugin_debug/sync_${Date.now()}` : null;
-
-    const testDir = `${this.settings.snipdDir}-TEST`;
+    const baseFolder = this.getBaseFolder();
+    const pageFolder = this.getPageFolder();
+    const testBaseFolder = `${baseFolder}-TEST`;
+    const testPageFolder = this.deriveTestPageFolder(baseFolder, pageFolder);
     
-    if (await this.app.vault.adapter.exists(testDir)) {
-      debugLog('Snipd plugin: removing existing test folder');
-      this.notice("Removing existing test folder...", true, 0, true);
-      await this.app.vault.adapter.rmdir(testDir, true);
+    const testFolders = [testBaseFolder];
+    if (!testPageFolder.startsWith(testBaseFolder)) {
+      testFolders.push(testPageFolder);
+    }
+    
+    for (const folder of testFolders) {
+      if (await this.app.vault.adapter.exists(folder)) {
+        debugLog('Snipd plugin: removing existing test folder', folder);
+        this.notice("Removing existing test folder...", true, 0, true);
+        await this.app.vault.adapter.rmdir(folder, true);
+      }
     }
 
     let response;
@@ -611,29 +641,46 @@ export default class SnipdPlugin extends Plugin {
           debugLog(`Snipd plugin: saved debug test export to ${testExportFilePath}`);
         }
         
+        const originalBaseFolderSetting = this.settings.baseFolder;
+        const originalPageFolderSetting = this.settings.pageFolder;
         const originalSnipdDir = this.settings.snipdDir;
-        this.settings.snipdDir = testDir;
+        const pageFolderForTest = originalPageFolderSetting ? testPageFolder : '';
+        let stats: { episodeCount: number; snipCount: number } | null = null;
         
-        await this.fetchAndSaveBaseFileForTest(testDir);
-        
-        const stats = await this.processZipExport(blob);
-        
-        
-        debugLog(`Snipd plugin: test sync requested ${episodeIds.length} episodes, received ${stats.episodeCount} episodes`);
-        if (stats.episodeCount < episodeIds.length) {
-          debugLog(`Snipd plugin: ${episodeIds.length - stats.episodeCount} episode(s) were skipped by the backend. This usually means the episode or show data is missing, or the episode has no snips for this user.`);
+        try {
+          this.settings.baseFolder = testBaseFolder;
+          this.settings.pageFolder = pageFolderForTest;
+          this.settings.snipdDir = testBaseFolder;
+          
+          await this.fetchAndSaveBaseFileForTest(testBaseFolder);
+          
+          stats = await this.processZipExport(blob);
+        } finally {
+          this.settings.baseFolder = originalBaseFolderSetting;
+          this.settings.pageFolder = originalPageFolderSetting;
+          this.settings.snipdDir = originalSnipdDir;
         }
         
-        this.settings.snipdDir = originalSnipdDir;
-        this.settings.isTestSyncing = false;
-        await this.saveSettings();
-        
-        if (this.settingsTab) {
-          this.settingsTab.display();
+        if (stats) {
+          debugLog(`Snipd plugin: test sync requested ${episodeIds.length} episodes, received ${stats.episodeCount} episodes`);
+          if (stats.episodeCount < episodeIds.length) {
+            debugLog(`Snipd plugin: ${episodeIds.length - stats.episodeCount} episode(s) were skipped by the backend. This usually means the episode or show data is missing, or the episode has no snips for this user.`);
+          }
+          
+          this.settings.isTestSyncing = false;
+          await this.saveSettings();
+          
+          if (this.settingsTab) {
+            this.settingsTab.display();
+          }
+          
+          this.setStatusBarPersistentMessage(`Test sync completed (${stats.episodeCount} episodes, ${stats.snipCount} snips)`);
+          this.clearStatusBarPersistentMessageAfterDelay(3000);
+        } else {
+          this.settings.isTestSyncing = false;
+          await this.saveSettings();
+          this.clearStatusBarPersistentMessage();
         }
-        
-        this.setStatusBarPersistentMessage(`Test sync completed (${stats.episodeCount} episodes, ${stats.snipCount} snips)`);
-        this.clearStatusBarPersistentMessageAfterDelay(3000);
       } else {
         debugLog("Snipd plugin: bad response for test export: ", exportResponse);
         const statusCode = exportResponse ? exportResponse.status : 0;
@@ -770,7 +817,7 @@ export default class SnipdPlugin extends Plugin {
     showName: string,
     totalSnipCount?: number
   ) {
-    const targetPath = normalizePath(`${this.settings.snipdDir}/Data/${showName}/${entityName}.md`);
+    const targetPath = normalizePath(`${this.getPageFolder()}/${showName}/${entityName}.md`);
 
     await createDirForFile(targetPath, this.fs);
 
@@ -1051,7 +1098,7 @@ export default class SnipdPlugin extends Plugin {
     let defaultOpenPath = this.settings.baseFileDefaultOpenPath;
     
     if (!defaultOpenPath) {
-      const metadataPath = normalizePath(`${this.settings.snipdDir}/metadata.json`);
+      const metadataPath = normalizePath(`${this.getBaseFolder()}/metadata.json`);
       const metadataExists = await this.app.vault.adapter.exists(metadataPath);
       
       if (metadataExists) {
@@ -1068,7 +1115,7 @@ export default class SnipdPlugin extends Plugin {
       
       if (!defaultOpenPath) {
         this.notice('Base file not found, fetching...', true);
-        await this.fetchAndSaveBaseFile(this.settings.snipdDir);
+        await this.fetchAndSaveBaseFile(this.getBaseFolder());
         defaultOpenPath = this.settings.baseFileDefaultOpenPath;
       }
     }
@@ -1077,7 +1124,7 @@ export default class SnipdPlugin extends Plugin {
       defaultOpenPath = 'Base/Snipd.base';
     }
     
-    const baseFilePath = normalizePath(`${this.settings.snipdDir}/${defaultOpenPath}`);
+    const baseFilePath = normalizePath(`${this.getBaseFolder()}/${defaultOpenPath}`);
     let file = this.app.vault.getAbstractFileByPath(baseFilePath);
     
     if (!file || !(file instanceof TFile)) {
@@ -1163,6 +1210,20 @@ export default class SnipdPlugin extends Plugin {
   async loadSettings() {
     const loadedData = await this.loadData() as Partial<SnipdPluginSettings>;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+    if (loadedData?.snipdDir && !loadedData.baseFolder) {
+      this.settings.baseFolder = loadedData.snipdDir;
+    }
+    if (!this.settings.baseFolder) {
+      this.settings.baseFolder = DEFAULT_SETTINGS.baseFolder;
+    }
+    if (!this.settings.pageFolder && loadedData && !Object.prototype.hasOwnProperty.call(loadedData, 'pageFolder')) {
+      this.settings.pageFolder = "";
+    }
+    this.settings.baseFolder = normalizePath(this.settings.baseFolder);
+    if (this.settings.pageFolder) {
+      this.settings.pageFolder = normalizePath(this.settings.pageFolder);
+    }
+    this.settings.snipdDir = this.settings.baseFolder;
     
     if (this.settings.encryptedApiKey) {
       try {
@@ -1188,6 +1249,7 @@ export default class SnipdPlugin extends Plugin {
   }
 
   async saveSettings() {
+    this.settings.snipdDir = this.settings.baseFolder || this.settings.snipdDir;
     if (this.settings.apiKey) {
       try {
         this.settings.encryptedApiKey = await SecureStorage.encryptApiKey(

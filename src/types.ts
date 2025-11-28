@@ -2,6 +2,8 @@ export interface SnipdPluginSettings {
   apiKey: string;
   encryptedApiKey: string;
   snipdDir: string;
+  baseFolder: string;
+  pageFolder: string;
   frequency: string;
   triggerOnLoad: boolean;
   isSyncing: boolean;
@@ -59,7 +61,11 @@ export const DEFAULT_SNIP_TEMPLATE = `### {{snip_favorite_star}} [{{snip_title}}
 
 {{snip_quote}}[[#### 💬 Quote]]
 
-{{snip_transcript}}[[#### 📚 Transcript]]
+<details>
+<summary>📚 Transcript</summary>
+
+{{snip_transcript}}
+</details>
 
 ---
 
@@ -71,6 +77,8 @@ export const DEFAULT_SETTINGS: SnipdPluginSettings = {
   apiKey: "",
   encryptedApiKey: "",
   snipdDir: "Snipd",
+  baseFolder: "Snipd",
+  pageFolder: "",
   frequency: "0",
   triggerOnLoad: true,
   isSyncing: false,
