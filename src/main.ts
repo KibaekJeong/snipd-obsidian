@@ -146,6 +146,30 @@ export default class SnipdPlugin extends Plugin {
     return await (entry as any).getData(new zip.TextWriter());
   }
 
+  private remapBaseDirectory(relativePath: string, baseFileRelativePath: string): string {
+    const baseDir = baseFileRelativePath.includes('/') ? baseFileRelativePath.substring(0, baseFileRelativePath.lastIndexOf('/')) : '';
+    if (!baseDir) {
+      if (relativePath === 'Base') {
+        return '';
+      }
+      if (relativePath.startsWith('Base/')) {
+        return relativePath.substring('Base/'.length);
+      }
+      return relativePath;
+    }
+
+    if (relativePath === 'Base') {
+      return baseDir;
+    }
+
+    if (relativePath.startsWith('Base/')) {
+      const remainder = relativePath.substring('Base/'.length);
+      return normalizePath(`${baseDir}/${remainder}`);
+    }
+
+    return relativePath;
+  }
+
   async clearSyncMetadata() {
     debugLog('Snipd plugin: clearing sync metadata...');
     this.settings.fileHashMap = {};
@@ -956,6 +980,7 @@ export default class SnipdPlugin extends Plugin {
         if (relativePath.startsWith('Files/')) {
           relativePath = relativePath.substring(6);
         }
+        relativePath = this.remapBaseDirectory(relativePath, baseFileRelativePath);
         if (relativePath.endsWith('.base')) {
           relativePath = baseFileRelativePath;
         }
@@ -1083,6 +1108,7 @@ export default class SnipdPlugin extends Plugin {
         if (relativePath.startsWith('Files/')) {
           relativePath = relativePath.substring(6);
         }
+        relativePath = this.remapBaseDirectory(relativePath, baseFileRelativePath);
         if (relativePath.endsWith('.base')) {
           relativePath = baseFileRelativePath;
         }
