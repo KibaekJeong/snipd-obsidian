@@ -62,12 +62,7 @@ export const DEFAULT_SNIP_TEMPLATE = `### {{snip_favorite_star}} [{{snip_title}}
 
 {{snip_quote}}[[#### 💬 Quote]]
 
-<details>
-<summary>📚 Transcript</summary>
-
-{{snip_transcript}}
-</details>
-
+{{snip_transcript}}[[#### 📚 Transcript]]
 ---
 
 `;
