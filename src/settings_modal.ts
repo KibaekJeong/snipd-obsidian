@@ -1,7 +1,7 @@
 import { App, Notice, normalizePath, PluginSettingTab, Setting, requestUrl, TextComponent } from 'obsidian';
 import type SnipdPlugin from './main';
 import { FormattingConfigModal } from './formatting_modal';
-import { DEFAULT_SETTINGS } from './types';
+import { DEFAULT_SETTINGS, DEFAULT_BASE_FILE_PATH } from './types';
 import { isDev, debugLog } from './utils';
 import { API_BASE_URL, AUTH_URL } from './main';
 
@@ -225,6 +225,21 @@ export class SnipdSettingModal extends PluginSettingTab {
             if (!this.plugin.settings.pageFolder && pageFolderText) {
               pageFolderText.setPlaceholder(this.plugin.getPageFolder());
             }
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Base file path')
+      .setDesc('Relative path under the base folder where the Snipd Base file is stored (include the filename, e.g. Snipd.base).')
+      .addText(text => {
+        text
+          .setPlaceholder(DEFAULT_BASE_FILE_PATH)
+          .setValue(this.plugin.settings.baseFilePath || DEFAULT_BASE_FILE_PATH)
+          .onChange(async (value) => {
+            const normalized = normalizePath(value?.trim() || DEFAULT_BASE_FILE_PATH);
+            this.plugin.settings.baseFilePath = normalized;
+            this.plugin.settings.baseFileDefaultOpenPath = normalized;
             await this.plugin.saveSettings();
           });
       });

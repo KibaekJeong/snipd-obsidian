@@ -16,6 +16,7 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_EPISODE_TEMPLATE,
   DEFAULT_SNIP_TEMPLATE,
+  DEFAULT_BASE_FILE_PATH,
   MetadataJson,
   EpisodeSnipMetadata,
   FetchExportMetadataResponse,
@@ -40,6 +41,17 @@ export default class SnipdPlugin extends Plugin {
   getBaseFolder(): string {
     const folder = this.settings.baseFolder?.trim() || this.settings.snipdDir || DEFAULT_SETTINGS.baseFolder;
     return normalizePath(folder);
+  }
+
+  private getBaseFileRelativePath(baseFileMetadata: BaseFileMetadata | null = null): string {
+    const candidates = [
+      this.settings.baseFilePath?.trim(),
+      baseFileMetadata?.defaultOpenPath,
+      this.settings.baseFileDefaultOpenPath,
+      DEFAULT_BASE_FILE_PATH,
+    ];
+    const resolved = candidates.find((value): value is string => !!value) || DEFAULT_BASE_FILE_PATH;
+    return normalizePath(resolved);
   }
 
   getPageFolder(): string {
@@ -127,6 +139,11 @@ export default class SnipdPlugin extends Plugin {
 
   async checkSnipdDirectoryExists(): Promise<boolean> {
     return await this.app.vault.adapter.exists(this.getPageFolder());
+  }
+
+  private async readZipEntryText(entry: zip.Entry): Promise<string> {
+    // zip.js typings don't expose getData on the Entry union, so cast to any.
+    return await (entry as any).getData(new zip.TextWriter());
   }
 
   async clearSyncMetadata() {
@@ -718,13 +735,11 @@ export default class SnipdPlugin extends Plugin {
     const episodeFiles: Map<string, { full: string; append?: string }> = new Map();
 
     for (const entry of entries) {
-      // @ts-ignore - zip.js types are incomplete
-      const zipEntry: zip.Entry = entry;
+      const zipEntry: zip.Entry = entry as zip.Entry;
       if (zipEntry.directory) {
         continue;
       }
-      // @ts-ignore
-      const fileContent = await zipEntry.getData(new zip.TextWriter());
+      const fileContent = await this.readZipEntryText(zipEntry);
 
       if (zipEntry.filename === 'metadata.json') {
         metadata = JSON.parse(fileContent) as MetadataJson;
@@ -889,6 +904,7 @@ export default class SnipdPlugin extends Plugin {
     let updatedFileCount = 0;
     let removedFileCount = 0;
     let baseFileMetadata: BaseFileMetadata | null = null;
+    let baseFileRelativePath = this.getBaseFileRelativePath();
     const filesInZip = new Set<string>();
     try {
       debugLog('Snipd plugin: fetching base file...');
@@ -913,28 +929,35 @@ export default class SnipdPlugin extends Plugin {
       zipReader = new zip.ZipReader(blobReader);
       const entries = await zipReader.getEntries();
 
+      const metadataEntry = entries.find((entry) => !entry.directory && entry.filename === 'metadata.json');
+      if (metadataEntry) {
+        const metadataContent = await this.readZipEntryText(metadataEntry as zip.Entry);
+        baseFileMetadata = JSON.parse(metadataContent) as BaseFileMetadata;
+        baseFileRelativePath = this.getBaseFileRelativePath(baseFileMetadata);
+        const metadataPath = normalizePath(`${folderPath}/metadata.json`);
+        await createDirForFile(metadataPath, this.app.vault.adapter);
+        await this.app.vault.adapter.write(metadataPath, metadataContent);
+        debugLog(`Snipd plugin: saved base file metadata to ${metadataPath}`);
+      }
+
       for (const entry of entries) {
         const zipEntry: zip.Entry = entry;
         if (zipEntry.directory) {
           continue;
         }
         
-        // @ts-ignore
-         
-        const fileContent = await zipEntry.getData(new zip.TextWriter());
-        
         if (zipEntry.filename === 'metadata.json') {
-          baseFileMetadata = JSON.parse(fileContent) as BaseFileMetadata;
-          const metadataPath = normalizePath(`${folderPath}/metadata.json`);
-          await createDirForFile(metadataPath, this.app.vault.adapter);
-          await this.app.vault.adapter.write(metadataPath, fileContent);
-          debugLog(`Snipd plugin: saved base file metadata to ${metadataPath}`);
           continue;
         }
+        
+        const fileContent = await this.readZipEntryText(zipEntry);
         
         let relativePath = zipEntry.filename;
         if (relativePath.startsWith('Files/')) {
           relativePath = relativePath.substring(6);
+        }
+        if (relativePath.endsWith('.base')) {
+          relativePath = baseFileRelativePath;
         }
         const baseFilePath = normalizePath(`${folderPath}/${relativePath}`);
         filesInZip.add(baseFilePath);
@@ -1002,15 +1025,15 @@ export default class SnipdPlugin extends Plugin {
       this.settings.baseFileHashes = existingHashes;
       this.settings.baseFileManualOverrides = manualOverrides;
       this.settings.lastBaseFileSyncToken = this.settings.current_export_updated_after ?? null;
-      if (baseFileMetadata) {
-        this.settings.baseFileDefaultOpenPath = baseFileMetadata.defaultOpenPath;
-      }
+      this.settings.baseFileDefaultOpenPath = baseFileRelativePath;
       await this.saveSettings();
     }
   }
 
   async fetchAndSaveBaseFileForTest(folderPath: string): Promise<void> {
     let zipReader: zip.ZipReader<zip.BlobReader> | null = null;
+    let baseFileMetadata: BaseFileMetadata | null = null;
+    let baseFileRelativePath = this.getBaseFileRelativePath();
     try {
       debugLog('Snipd plugin: fetching base file for test sync...');
       
@@ -1034,27 +1057,34 @@ export default class SnipdPlugin extends Plugin {
       zipReader = new zip.ZipReader(blobReader);
       const entries = await zipReader.getEntries();
 
+      const metadataEntry = entries.find((entry) => !entry.directory && entry.filename === 'metadata.json');
+      if (metadataEntry) {
+        const metadataContent = await this.readZipEntryText(metadataEntry as zip.Entry);
+        baseFileMetadata = JSON.parse(metadataContent) as BaseFileMetadata;
+        baseFileRelativePath = this.getBaseFileRelativePath(baseFileMetadata);
+        const metadataPath = normalizePath(`${folderPath}/metadata.json`);
+        await createDirForFile(metadataPath, this.app.vault.adapter);
+        await this.app.vault.adapter.write(metadataPath, metadataContent);
+        debugLog(`Snipd plugin: saved base file metadata to ${metadataPath} (test sync - always overwrite)`);
+      }
+
       for (const entry of entries) {
         const zipEntry: zip.Entry = entry;
         if (zipEntry.directory) {
           continue;
         }
-        
-        // @ts-ignore
-         
-        const fileContent = await zipEntry.getData(new zip.TextWriter());
-        
         if (zipEntry.filename === 'metadata.json') {
-          const metadataPath = normalizePath(`${folderPath}/metadata.json`);
-          await createDirForFile(metadataPath, this.app.vault.adapter);
-          await this.app.vault.adapter.write(metadataPath, fileContent);
-          debugLog(`Snipd plugin: saved base file metadata to ${metadataPath} (test sync - always overwrite)`);
           continue;
         }
+        
+        const fileContent = await this.readZipEntryText(zipEntry);
         
         let relativePath = zipEntry.filename;
         if (relativePath.startsWith('Files/')) {
           relativePath = relativePath.substring(6);
+        }
+        if (relativePath.endsWith('.base')) {
+          relativePath = baseFileRelativePath;
         }
         const baseFilePath = normalizePath(`${folderPath}/${relativePath}`);
         
@@ -1095,38 +1125,36 @@ export default class SnipdPlugin extends Plugin {
   }
 
   async openBaseFile() {
-    let defaultOpenPath = this.settings.baseFileDefaultOpenPath;
-    
-    if (!defaultOpenPath) {
+    let baseFileMetadata: BaseFileMetadata | null = null;
+
+    if (!this.settings.baseFilePath) {
       const metadataPath = normalizePath(`${this.getBaseFolder()}/metadata.json`);
       const metadataExists = await this.app.vault.adapter.exists(metadataPath);
       
       if (metadataExists) {
         try {
           const metadataContent = await this.app.vault.adapter.read(metadataPath);
-          const metadata = JSON.parse(metadataContent) as BaseFileMetadata;
-          defaultOpenPath = metadata.defaultOpenPath;
-          this.settings.baseFileDefaultOpenPath = defaultOpenPath;
+          baseFileMetadata = JSON.parse(metadataContent) as BaseFileMetadata;
+          this.settings.baseFileDefaultOpenPath = baseFileMetadata.defaultOpenPath;
           await this.saveSettings();
         } catch (error) {
           debugLog('Snipd plugin: failed to read base file metadata:', error);
         }
       }
-      
-      if (!defaultOpenPath) {
-        this.notice('Base file not found, fetching...', true);
-        await this.fetchAndSaveBaseFile(this.getBaseFolder());
-        defaultOpenPath = this.settings.baseFileDefaultOpenPath;
-      }
     }
     
-    if (!defaultOpenPath) {
-      defaultOpenPath = 'Base/Snipd.base';
-    }
-    
-    const baseFilePath = normalizePath(`${this.getBaseFolder()}/${defaultOpenPath}`);
+    let baseFileRelativePath = this.getBaseFileRelativePath(baseFileMetadata);
+    let baseFilePath = normalizePath(`${this.getBaseFolder()}/${baseFileRelativePath}`);
     let file = this.app.vault.getAbstractFileByPath(baseFilePath);
     
+    if (!file || !(file instanceof TFile)) {
+      this.notice('Base file not found, fetching...', true);
+      await this.fetchAndSaveBaseFile(this.getBaseFolder());
+      baseFileRelativePath = this.getBaseFileRelativePath();
+      baseFilePath = normalizePath(`${this.getBaseFolder()}/${baseFileRelativePath}`);
+      file = this.app.vault.getAbstractFileByPath(baseFilePath);
+    }
+
     if (!file || !(file instanceof TFile)) {
       this.notice(`Base file not found: ${baseFilePath}`, true);
       return;
@@ -1223,6 +1251,10 @@ export default class SnipdPlugin extends Plugin {
     if (this.settings.pageFolder) {
       this.settings.pageFolder = normalizePath(this.settings.pageFolder);
     }
+    if (!this.settings.baseFilePath) {
+      this.settings.baseFilePath = DEFAULT_BASE_FILE_PATH;
+    }
+    this.settings.baseFilePath = normalizePath(this.settings.baseFilePath);
     this.settings.snipdDir = this.settings.baseFolder;
     
     if (this.settings.encryptedApiKey) {
@@ -1250,6 +1282,7 @@ export default class SnipdPlugin extends Plugin {
 
   async saveSettings() {
     this.settings.snipdDir = this.settings.baseFolder || this.settings.snipdDir;
+    this.settings.baseFilePath = normalizePath(this.settings.baseFilePath || DEFAULT_BASE_FILE_PATH);
     if (this.settings.apiKey) {
       try {
         this.settings.encryptedApiKey = await SecureStorage.encryptApiKey(
