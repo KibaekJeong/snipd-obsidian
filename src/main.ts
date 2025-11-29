@@ -833,6 +833,18 @@ export default class SnipdPlugin extends Plugin {
            
            if (fetchedName) {
              channelName = fetchedName;
+             // Also store URL/Thumbnail if found
+             // Note: These variables are local to this block, we need them for metadata update
+           }
+           
+           // If direct fetch failed (no channel name), try searching by title as fallback
+           if (!channelName && episodeData?.episode_name) {
+              const searchResult = await this.searchYouTubeByTitle(episodeData.episode_name);
+              if (searchResult.channelName) {
+                  channelName = searchResult.channelName;
+                  // If we found a better match via search, we might want to use its URLs
+                  // But only if we didn't get them from the direct URL fetch (which shouldn't happen if channelName was null)
+              }
            }
 
            // Update showName for folder structure
@@ -868,20 +880,74 @@ export default class SnipdPlugin extends Plugin {
                 // We check against the proposed line.
                 const contentIncludes = (text: string) => fileData.full.includes(text);
 
-                if (channelUrl && !contentIncludes(`- Original Show URL: ${channelUrl}`)) {
-                    extraMetadata += `\n- Original Show URL: ${channelUrl}`;
-                }
-                if (episodeData.episode_url && !contentIncludes(`- Original Episode URL: ${episodeData.episode_url}`)) {
-                    extraMetadata += `\n- Original Episode URL: ${episodeData.episode_url}`;
-                }
-                if (thumbnailUrl && !contentIncludes(`- Image URL: ${thumbnailUrl}`)) {
-                    extraMetadata += `\n- Image URL: ${thumbnailUrl}`;
-                }
-                
-                if (extraMetadata) {
-                    fileData.full = fileData.full.replace(insertionPoint, insertionPoint + extraMetadata);
-                }
+                // Re-fetch variables if they were set inside the blocks (typescript scoping)
+                // Actually, let's use the values we have. 
+                // We need to capture the values from the fetch/search calls above to use here.
+                // Re-structuring the logic slightly to ensure we have the vars.
              }
+           }
+        }
+        
+        // RE-STRUCTURED BLOCK FOR CLARITY AND SCOPING
+        if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com') || (episodeData?.episode_name && showName === 'Your uploads')) {
+           let fetchedChannelName: string | null = null;
+           let fetchedChannelUrl: string | null = null;
+           let fetchedThumbnailUrl: string | null = null;
+           let fetchedVideoUrl: string | null = null; // From search result
+
+           // A. Try direct URL fetch
+           if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com')) {
+               const data = await this.fetchYouTubeVideoData(episodeData.episode_url);
+               fetchedChannelName = data.channelName;
+               fetchedChannelUrl = data.channelUrl;
+               fetchedThumbnailUrl = data.thumbnailUrl;
+           }
+
+           // B. Fallback to Search by Title if URL fetch failed to get channel name
+           if (!fetchedChannelName && episodeData?.episode_name) {
+               const searchData = await this.searchYouTubeByTitle(episodeData.episode_name);
+               fetchedChannelName = searchData.channelName;
+               fetchedChannelUrl = searchData.channelUrl;
+               fetchedThumbnailUrl = searchData.thumbnailUrl;
+               fetchedVideoUrl = searchData.videoUrl;
+           }
+
+           if (fetchedChannelName) {
+               channelName = fetchedChannelName;
+               showName = channelName;
+           }
+
+           // MODIFY CONTENT with whatever data we found
+           if (fileData.full && (channelName || fetchedChannelUrl || fetchedThumbnailUrl || fetchedVideoUrl)) {
+                if (channelName) {
+                    fileData.full = fileData.full.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
+                    fileData.full = fileData.full.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
+                }
+
+                const insertionPointRegex = /(- Episode URL:.*$)/m;
+                const match = fileData.full.match(insertionPointRegex);
+                if (match) {
+                    const insertionPoint = match[0];
+                    let extraMetadata = '';
+                    const contentIncludes = (text: string) => fileData.full.includes(text);
+
+                    if (fetchedChannelUrl && !contentIncludes(`- Original Show URL: ${fetchedChannelUrl}`)) {
+                        extraMetadata += `\n- Original Show URL: ${fetchedChannelUrl}`;
+                    }
+                    
+                    const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
+                    if (originalEpUrl && !contentIncludes(`- Original Episode URL: ${originalEpUrl}`)) {
+                         extraMetadata += `\n- Original Episode URL: ${originalEpUrl}`;
+                    }
+                    
+                    if (fetchedThumbnailUrl && !contentIncludes(`- Image URL: ${fetchedThumbnailUrl}`)) {
+                        extraMetadata += `\n- Image URL: ${fetchedThumbnailUrl}`;
+                    }
+
+                    if (extraMetadata) {
+                        fileData.full = fileData.full.replace(insertionPoint, insertionPoint + extraMetadata);
+                    }
+                }
            }
         } else if (channelName) {
             // Fallback: If we only have channel name from extraction but no YouTube fetch
@@ -1015,6 +1081,47 @@ export default class SnipdPlugin extends Plugin {
     } catch (e) {
       debugLog('Snipd plugin: failed to fetch YouTube video data', e);
       return { channelName: null, channelUrl: null, thumbnailUrl: null };
+    }
+  }
+
+  private async searchYouTubeByTitle(title: string): Promise<{
+    channelName: string | null;
+    channelUrl: string | null;
+    videoUrl: string | null;
+    thumbnailUrl: string | null;
+  }> {
+    try {
+      // Search YouTube for the video title
+      const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(title)}`;
+      const response = await requestUrl({ url: searchUrl });
+      const html = response.text;
+
+      // Extract the first video result's data from the initial data JSON in the HTML
+      // ytInitialData is usually present in a script tag
+      const ytInitialDataMatch = html.match(/var ytInitialData = (\{.*?\});/);
+      if (ytInitialDataMatch && ytInitialDataMatch[1]) {
+        const data = JSON.parse(ytInitialDataMatch[1]);
+        
+        // Navigate through the JSON structure to find the first video renderer
+        const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+        const firstItem = contents?.[0]?.itemSectionRenderer?.contents?.[0]?.videoRenderer;
+
+        if (firstItem) {
+           const channelName = firstItem.ownerText?.runs?.[0]?.text || null;
+           const channelId = firstItem.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId;
+           const channelUrl = channelId ? `https://www.youtube.com/channel/${channelId}` : null;
+           const videoId = firstItem.videoId;
+           const videoUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : null;
+           const thumbnailUrl = firstItem.thumbnail?.thumbnails?.[0]?.url || null;
+
+           return { channelName, channelUrl, videoUrl, thumbnailUrl };
+        }
+      }
+
+      return { channelName: null, channelUrl: null, videoUrl: null, thumbnailUrl: null };
+    } catch (e) {
+      debugLog('Snipd plugin: failed to search YouTube by title', e);
+      return { channelName: null, channelUrl: null, videoUrl: null, thumbnailUrl: null };
     }
   }
 
