@@ -150,6 +150,27 @@ export class SnipdSettingModal extends PluginSettingTab {
       });
     }
 
+    // Additional sync actions (shown when not syncing)
+    if (!this.plugin.settings.isSyncing && this.plugin.settings.hasCompletedFirstSync) {
+      const syncActionsContainer = syncStatusContainer.createDiv({ cls: 'snipd-sync-actions' });
+      
+      const forceResyncButton = syncActionsContainer.createEl('button', { 
+        text: 'Force full re-sync',
+        cls: 'snipd-secondary-button'
+      });
+      forceResyncButton.addEventListener('click', () => {
+        void this.plugin.forceFullResync();
+      });
+
+      const migrateYouTubeButton = syncActionsContainer.createEl('button', { 
+        text: 'Migrate YouTube uploads',
+        cls: 'snipd-secondary-button'
+      });
+      migrateYouTubeButton.addEventListener('click', () => {
+        void this.plugin.migrateYouTubeUploads();
+      });
+    }
+
     const syncStatusBody = syncStatusContainer.createDiv({ cls: 'snipd-sync-status-body' });
 
     if (this.plugin.settings.isSyncing) {

@@ -1437,6 +1437,175 @@ export default class SnipdPlugin extends Plugin {
     this.registerInterval(this.scheduleInterval);
   }
 
+  async forceFullResync() {
+    if (this.settings.isSyncing) {
+      this.notice("Sync already in progress", true);
+      return;
+    }
+
+    this.notice("Clearing sync history for full re-sync...", true);
+    
+    // Clear the timestamp so all episodes are fetched again
+    this.settings.last_updated_after = null;
+    this.settings.latestSyncedSnipUpdateTs = null;
+    this.settings.current_export_updated_after = null;
+    this.settings.current_export_batch_index = 0;
+    this.settings.current_export_total_batches = 0;
+    await this.saveSettings();
+    
+    // Now trigger a normal sync which will fetch everything
+    await this.syncSnipd();
+  }
+
+  async migrateYouTubeUploads() {
+    this.notice("Migrating YouTube uploads...", true);
+    this.setStatusBarPersistentMessage("Migrating YouTube uploads...");
+    
+    const yourUploadsFolder = normalizePath(`${this.getPageFolder()}/${sanitizeFileName('Your uploads')}`);
+    
+    if (!(await this.app.vault.adapter.exists(yourUploadsFolder))) {
+      this.notice("No 'Your uploads' folder found", true);
+      this.clearStatusBarPersistentMessage();
+      return;
+    }
+
+    const files = await this.app.vault.adapter.list(yourUploadsFolder);
+    const mdFiles = files.files.filter(f => f.endsWith('.md'));
+    
+    if (mdFiles.length === 0) {
+      this.notice("No files found in 'Your uploads' folder", true);
+      this.clearStatusBarPersistentMessage();
+      return;
+    }
+
+    let migratedCount = 0;
+    let failedCount = 0;
+
+    for (const filePath of mdFiles) {
+      try {
+        const content = await this.app.vault.adapter.read(filePath);
+        
+        // Try to find YouTube URL in the content
+        const youtubeUrlMatch = content.match(/Episode URL:.*?(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)[^\s\)]+)/);
+        const originalEpUrlMatch = content.match(/Original Episode URL:\s*(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)[^\s\)]+)/);
+        
+        const youtubeUrl = originalEpUrlMatch?.[1] || youtubeUrlMatch?.[1];
+        
+        // Also try to get episode title from content
+        const titleMatch = content.match(/^#\s+(.+)$/m);
+        const episodeTitle = titleMatch?.[1];
+        
+        let channelName: string | null = null;
+        let channelUrl: string | null = null;
+        let thumbnailUrl: string | null = null;
+
+        // Try to fetch YouTube data
+        if (youtubeUrl) {
+          debugLog(`Snipd plugin: Migrating file ${filePath}, found URL: ${youtubeUrl}`);
+          const data = await this.fetchYouTubeVideoData(youtubeUrl);
+          channelName = data.channelName;
+          channelUrl = data.channelUrl;
+          thumbnailUrl = data.thumbnailUrl;
+        }
+
+        // Fallback to search by title
+        if (!channelName && episodeTitle) {
+          debugLog(`Snipd plugin: URL fetch failed, searching by title: ${episodeTitle}`);
+          const searchData = await this.searchYouTubeByTitle(episodeTitle);
+          channelName = searchData.channelName;
+          if (!channelUrl) channelUrl = searchData.channelUrl;
+          if (!thumbnailUrl) thumbnailUrl = searchData.thumbnailUrl;
+        }
+
+        if (!channelName) {
+          debugLog(`Snipd plugin: Could not determine channel name for ${filePath}`);
+          failedCount++;
+          continue;
+        }
+
+        // Update content
+        let updatedContent = content;
+        
+        // Update Show field
+        updatedContent = updatedContent.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
+        // Update Owner / Host field
+        updatedContent = updatedContent.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
+
+        // Add extra metadata if not present
+        const insertionPointRegex = /(- Episode URL:.*$)/m;
+        const match = updatedContent.match(insertionPointRegex);
+        if (match) {
+          const insertionPoint = match[0];
+          let extraMetadata = '';
+
+          if (channelUrl && !updatedContent.includes(`- Original Show URL:`)) {
+            extraMetadata += `\n- Original Show URL: ${channelUrl}`;
+          }
+          if (youtubeUrl && !updatedContent.includes(`- Original Episode URL:`)) {
+            extraMetadata += `\n- Original Episode URL: ${youtubeUrl}`;
+          }
+          if (thumbnailUrl && !updatedContent.includes(`- Image URL:`)) {
+            extraMetadata += `\n- Image URL: ${thumbnailUrl}`;
+          }
+
+          if (extraMetadata) {
+            updatedContent = updatedContent.replace(insertionPoint, insertionPoint + extraMetadata);
+          }
+        }
+
+        // Move file to new location
+        const fileName = filePath.split('/').pop() || '';
+        const newFolderPath = normalizePath(`${this.getPageFolder()}/${sanitizeFileName(channelName)}`);
+        const newFilePath = normalizePath(`${newFolderPath}/${fileName}`);
+
+        // Create new folder if needed
+        await createDirForFile(newFilePath, this.app.vault.adapter);
+
+        // Write updated content to new location
+        await this.app.vault.adapter.write(newFilePath, updatedContent);
+
+        // Delete old file
+        await this.app.vault.adapter.remove(filePath);
+
+        // Migrate settings
+        if (this.settings.fileHashMap[filePath]) {
+          this.settings.fileHashMap[newFilePath] = Md5.hashStr(updatedContent).toString();
+          delete this.settings.fileHashMap[filePath];
+        }
+        if (this.settings.appendOnlyFiles[filePath]) {
+          this.settings.appendOnlyFiles[newFilePath] = this.settings.appendOnlyFiles[filePath];
+          delete this.settings.appendOnlyFiles[filePath];
+        }
+
+        debugLog(`Snipd plugin: Migrated ${filePath} to ${newFilePath}`);
+        migratedCount++;
+        
+        this.setStatusBarPersistentMessage(`Migrating... (${migratedCount}/${mdFiles.length})`);
+      } catch (e) {
+        debugLog(`Snipd plugin: Failed to migrate ${filePath}`, e);
+        failedCount++;
+      }
+    }
+
+    await this.saveSettings();
+
+    // Try to remove the empty "Your uploads" folder
+    try {
+      const remainingFiles = await this.app.vault.adapter.list(yourUploadsFolder);
+      if (remainingFiles.files.length === 0 && remainingFiles.folders.length === 0) {
+        await this.app.vault.adapter.rmdir(yourUploadsFolder, false);
+        debugLog(`Snipd plugin: Removed empty 'Your uploads' folder`);
+      }
+    } catch (e) {
+      debugLog(`Snipd plugin: Could not remove 'Your uploads' folder`, e);
+    }
+
+    const message = `Migration complete: ${migratedCount} moved, ${failedCount} failed`;
+    this.notice(message, true);
+    this.setStatusBarPersistentMessage(message);
+    this.clearStatusBarPersistentMessageAfterDelay(5000);
+  }
+
   async openBaseFile() {
     let baseFileMetadata: BaseFileMetadata | null = null;
 
@@ -1499,6 +1668,22 @@ export default class SnipdPlugin extends Plugin {
       name: 'Sync now',
       callback: () => {
         void this.syncSnipd();
+      }
+    });
+
+    this.addCommand({
+      id: 'snipd-force-full-sync',
+      name: 'Force full re-sync (re-download all episodes)',
+      callback: () => {
+        void this.forceFullResync();
+      }
+    });
+
+    this.addCommand({
+      id: 'snipd-migrate-youtube-uploads',
+      name: 'Migrate YouTube uploads to channel folders',
+      callback: () => {
+        void this.migrateYouTubeUploads();
       }
     });
 
