@@ -814,144 +814,99 @@ export default class SnipdPlugin extends Plugin {
       const originalShowName = showName;
       if (showName === 'Your uploads') {
         let channelName = '';
+        let fetchedChannelUrl: string | null = null;
+        let fetchedThumbnailUrl: string | null = null;
+        let fetchedVideoUrl: string | null = null;
         
-        // 1. Try to extract from the note content (relies on "Owner / Host" line in template)
-        // We check full content if available.
+        // 1. Try to extract channel name from the note content (relies on "Owner / Host" line in template)
         if (fileData.full) {
             const ownerMatch = fileData.full.match(/- Owner \/ Host: (.*)/);
             if (ownerMatch && ownerMatch[1]) {
-            const potentialChannelName = ownerMatch[1].trim();
-            if (potentialChannelName) {
-                channelName = potentialChannelName;
-            }
+                const potentialChannelName = ownerMatch[1].trim();
+                if (potentialChannelName && potentialChannelName !== 'Your uploads') {
+                    channelName = potentialChannelName;
+                }
             }
         }
 
-        // 2. Fetch extended data from YouTube if needed
-        if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com')) {
-           const { channelName: fetchedName, channelUrl, thumbnailUrl } = await this.fetchYouTubeVideoData(episodeData.episode_url);
-           
-           if (fetchedName) {
-             channelName = fetchedName;
-             // Also store URL/Thumbnail if found
-             // Note: These variables are local to this block, we need them for metadata update
-           }
-           
-           // If direct fetch failed (no channel name), try searching by title as fallback
-           if (!channelName && episodeData?.episode_name) {
-              const searchResult = await this.searchYouTubeByTitle(episodeData.episode_name);
-              if (searchResult.channelName) {
-                  channelName = searchResult.channelName;
-                  // If we found a better match via search, we might want to use its URLs
-                  // But only if we didn't get them from the direct URL fetch (which shouldn't happen if channelName was null)
-              }
-           }
+        // 2. Fetch extended data from YouTube
+        const isYouTubeUrl = episodeData?.episode_url && 
+            (episodeData.episode_url.includes('youtube.com') || episodeData.episode_url.includes('youtu.be'));
+        
+        if (isYouTubeUrl) {
+            debugLog(`Snipd plugin: Fetching YouTube data for URL: ${episodeData.episode_url}`);
+            const data = await this.fetchYouTubeVideoData(episodeData.episode_url);
+            debugLog(`Snipd plugin: YouTube fetch result:`, data);
+            
+            if (data.channelName) {
+                channelName = data.channelName;
+            }
+            fetchedChannelUrl = data.channelUrl;
+            fetchedThumbnailUrl = data.thumbnailUrl;
+        }
 
-           // Update showName for folder structure
-           if (channelName) {
-             showName = channelName;
-           }
+        // 3. Fallback to Search by Title if URL fetch failed to get channel name
+        if (!channelName && episodeData?.episode_name) {
+            debugLog(`Snipd plugin: URL fetch failed, searching YouTube by title: ${episodeData.episode_name}`);
+            const searchData = await this.searchYouTubeByTitle(episodeData.episode_name);
+            debugLog(`Snipd plugin: YouTube search result:`, searchData);
+            
+            if (searchData.channelName) {
+                channelName = searchData.channelName;
+            }
+            if (!fetchedChannelUrl && searchData.channelUrl) {
+                fetchedChannelUrl = searchData.channelUrl;
+            }
+            if (!fetchedThumbnailUrl && searchData.thumbnailUrl) {
+                fetchedThumbnailUrl = searchData.thumbnailUrl;
+            }
+            if (searchData.videoUrl) {
+                fetchedVideoUrl = searchData.videoUrl;
+            }
+        }
 
-           // MODIFY CONTENT: Update metadata fields and add new URLs
-           // Only possible if we have full content to modify.
-           if (fileData.full) {
-             if (channelName) {
-                // Update "Show" field
-                fileData.full = fileData.full.replace(
-                /^- Show: .*$/m,
-                `- Show: ${channelName}`
-                );
-                // Update "Owner / Host" field
-                fileData.full = fileData.full.replace(
-                /^- Owner \/ Host: .*$/m,
-                `- Owner / Host: ${channelName}`
-                );
-             }
-             
-             // Append original URLs and Image URL to metadata section
-             const insertionPointRegex = /(- Episode URL:.*$)/m;
-             const match = fileData.full.match(insertionPointRegex);
-             
-             if (match) {
+        // Update showName for folder structure
+        if (channelName) {
+            showName = channelName;
+            debugLog(`Snipd plugin: Using channel name for folder: ${showName}`);
+        }
+
+        // MODIFY CONTENT with whatever data we found
+        if (fileData.full && channelName) {
+            // Update "Show" field
+            fileData.full = fileData.full.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
+            // Update "Owner / Host" field
+            fileData.full = fileData.full.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
+        }
+
+        // Append original URLs and Image URL to metadata section
+        if (fileData.full && (fetchedChannelUrl || fetchedThumbnailUrl || fetchedVideoUrl || episodeData?.episode_url)) {
+            const insertionPointRegex = /(- Episode URL:.*$)/m;
+            const match = fileData.full.match(insertionPointRegex);
+            
+            if (match) {
                 const insertionPoint = match[0];
                 let extraMetadata = '';
-                
-                // Helper to check if line exists in content (simple check to avoid duplication)
-                // We check against the proposed line.
                 const contentIncludes = (text: string) => fileData.full.includes(text);
 
-                // Re-fetch variables if they were set inside the blocks (typescript scoping)
-                // Actually, let's use the values we have. 
-                // We need to capture the values from the fetch/search calls above to use here.
-                // Re-structuring the logic slightly to ensure we have the vars.
-             }
-           }
-        }
-        
-        // RE-STRUCTURED BLOCK FOR CLARITY AND SCOPING
-        if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com') || (episodeData?.episode_name && showName === 'Your uploads')) {
-           let fetchedChannelName: string | null = null;
-           let fetchedChannelUrl: string | null = null;
-           let fetchedThumbnailUrl: string | null = null;
-           let fetchedVideoUrl: string | null = null; // From search result
-
-           // A. Try direct URL fetch
-           if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com')) {
-               const data = await this.fetchYouTubeVideoData(episodeData.episode_url);
-               fetchedChannelName = data.channelName;
-               fetchedChannelUrl = data.channelUrl;
-               fetchedThumbnailUrl = data.thumbnailUrl;
-           }
-
-           // B. Fallback to Search by Title if URL fetch failed to get channel name
-           if (!fetchedChannelName && episodeData?.episode_name) {
-               const searchData = await this.searchYouTubeByTitle(episodeData.episode_name);
-               fetchedChannelName = searchData.channelName;
-               fetchedChannelUrl = searchData.channelUrl;
-               fetchedThumbnailUrl = searchData.thumbnailUrl;
-               fetchedVideoUrl = searchData.videoUrl;
-           }
-
-           if (fetchedChannelName) {
-               channelName = fetchedChannelName;
-               showName = channelName;
-           }
-
-           // MODIFY CONTENT with whatever data we found
-           if (fileData.full && (channelName || fetchedChannelUrl || fetchedThumbnailUrl || fetchedVideoUrl)) {
-                if (channelName) {
-                    fileData.full = fileData.full.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
-                    fileData.full = fileData.full.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
+                if (fetchedChannelUrl && !contentIncludes(`- Original Show URL:`)) {
+                    extraMetadata += `\n- Original Show URL: ${fetchedChannelUrl}`;
+                }
+                
+                const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
+                if (originalEpUrl && !contentIncludes(`- Original Episode URL:`)) {
+                    extraMetadata += `\n- Original Episode URL: ${originalEpUrl}`;
+                }
+                
+                if (fetchedThumbnailUrl && !contentIncludes(`- Image URL:`)) {
+                    extraMetadata += `\n- Image URL: ${fetchedThumbnailUrl}`;
                 }
 
-                const insertionPointRegex = /(- Episode URL:.*$)/m;
-                const match = fileData.full.match(insertionPointRegex);
-                if (match) {
-                    const insertionPoint = match[0];
-                    let extraMetadata = '';
-                    const contentIncludes = (text: string) => fileData.full.includes(text);
-
-                    if (fetchedChannelUrl && !contentIncludes(`- Original Show URL: ${fetchedChannelUrl}`)) {
-                        extraMetadata += `\n- Original Show URL: ${fetchedChannelUrl}`;
-                    }
-                    
-                    const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
-                    if (originalEpUrl && !contentIncludes(`- Original Episode URL: ${originalEpUrl}`)) {
-                         extraMetadata += `\n- Original Episode URL: ${originalEpUrl}`;
-                    }
-                    
-                    if (fetchedThumbnailUrl && !contentIncludes(`- Image URL: ${fetchedThumbnailUrl}`)) {
-                        extraMetadata += `\n- Image URL: ${fetchedThumbnailUrl}`;
-                    }
-
-                    if (extraMetadata) {
-                        fileData.full = fileData.full.replace(insertionPoint, insertionPoint + extraMetadata);
-                    }
+                if (extraMetadata) {
+                    fileData.full = fileData.full.replace(insertionPoint, insertionPoint + extraMetadata);
+                    debugLog(`Snipd plugin: Added extra metadata to content`);
                 }
-           }
-        } else if (channelName) {
-            // Fallback: If we only have channel name from extraction but no YouTube fetch
-            showName = channelName;
+            }
         }
       }
 
@@ -1032,51 +987,86 @@ export default class SnipdPlugin extends Plugin {
     thumbnailUrl: string | null;
   }> {
     try {
+      debugLog(`Snipd plugin: Requesting YouTube URL: ${url}`);
       const response = await requestUrl({ url: url });
       const html = response.text;
+      debugLog(`Snipd plugin: Received HTML length: ${html.length}`);
       
       let channelName: string | null = null;
       let channelUrl: string | null = null;
       let thumbnailUrl: string | null = null;
 
-      // 1. Channel Name
-      const ownerChannelNameMatch = html.match(/"ownerChannelName":"(.*?)"/);
-      if (ownerChannelNameMatch && ownerChannelNameMatch[1]) {
-        channelName = ownerChannelNameMatch[1];
-      } else {
-        const authorMatch = html.match(/"videoDetails":\{.*?"author":"(.*?)",/);
+      // Method 1: Try to find ytInitialPlayerResponse which contains video details
+      const playerResponseMatch = html.match(/var ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (playerResponseMatch && playerResponseMatch[1]) {
+        try {
+          const playerData = JSON.parse(playerResponseMatch[1]);
+          const videoDetails = playerData.videoDetails;
+          if (videoDetails) {
+            channelName = videoDetails.author || null;
+            if (videoDetails.channelId) {
+              channelUrl = `https://www.youtube.com/channel/${videoDetails.channelId}`;
+            }
+            // Get highest quality thumbnail
+            const thumbnails = videoDetails.thumbnail?.thumbnails;
+            if (thumbnails && thumbnails.length > 0) {
+              thumbnailUrl = thumbnails[thumbnails.length - 1].url;
+            }
+          }
+          debugLog(`Snipd plugin: Parsed ytInitialPlayerResponse - channel: ${channelName}`);
+        } catch (parseError) {
+          debugLog(`Snipd plugin: Failed to parse ytInitialPlayerResponse`, parseError);
+        }
+      }
+
+      // Method 2: Fallback to regex patterns if JSON parsing failed
+      if (!channelName) {
+        // Try ownerChannelName
+        const ownerChannelNameMatch = html.match(/"ownerChannelName"\s*:\s*"([^"]+)"/);
+        if (ownerChannelNameMatch && ownerChannelNameMatch[1]) {
+          channelName = ownerChannelNameMatch[1];
+          debugLog(`Snipd plugin: Found ownerChannelName: ${channelName}`);
+        }
+      }
+
+      if (!channelName) {
+        // Try author field
+        const authorMatch = html.match(/"author"\s*:\s*"([^"]+)"/);
         if (authorMatch && authorMatch[1]) {
           channelName = authorMatch[1];
+          debugLog(`Snipd plugin: Found author: ${channelName}`);
         }
       }
 
-      // 2. Channel URL
-      // Try finding canonical channel url first
-      const channelUrlMatch = html.match(/"ownerProfileUrl":"(.*?)"/);
-      if (channelUrlMatch && channelUrlMatch[1]) {
-        channelUrl = channelUrlMatch[1];
-      } else {
-        // Fallback to channelId to construct URL
-        const channelIdMatch = html.match(/"externalChannelId":"(.*?)"/);
-        if (channelIdMatch && channelIdMatch[1]) {
-          channelUrl = `https://www.youtube.com/channel/${channelIdMatch[1]}`;
+      if (!channelUrl) {
+        // Try ownerProfileUrl
+        const channelUrlMatch = html.match(/"ownerProfileUrl"\s*:\s*"([^"]+)"/);
+        if (channelUrlMatch && channelUrlMatch[1]) {
+          channelUrl = channelUrlMatch[1];
+        } else {
+          // Try channelId
+          const channelIdMatch = html.match(/"channelId"\s*:\s*"([^"]+)"/);
+          if (channelIdMatch && channelIdMatch[1]) {
+            channelUrl = `https://www.youtube.com/channel/${channelIdMatch[1]}`;
+          }
         }
       }
 
-      // 3. Thumbnail URL
-      // Look for the first high-res thumbnail in videoDetails
-      const thumbnailMatch = html.match(/"thumbnail":\{"thumbnails":\[.*?\{"url":"(.*?)".*?\]/);
-      // or simpler match for just any URL inside thumbnails array structure
-      if (thumbnailMatch && thumbnailMatch[1]) {
-        thumbnailUrl = thumbnailMatch[1];
-      } else {
-         // Fallback regex for og:image or similar if needed, but videoDetails usually has it.
-         const ogImageMatch = html.match(/<meta property="og:image" content="(.*?)">/);
-         if (ogImageMatch && ogImageMatch[1]) {
-            thumbnailUrl = ogImageMatch[1];
-         }
+      if (!thumbnailUrl) {
+        // Try og:image meta tag
+        const ogImageMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/);
+        if (ogImageMatch && ogImageMatch[1]) {
+          thumbnailUrl = ogImageMatch[1];
+        } else {
+          // Alternative og:image format
+          const ogImageAltMatch = html.match(/<meta\s+content="([^"]+)"\s+property="og:image"/);
+          if (ogImageAltMatch && ogImageAltMatch[1]) {
+            thumbnailUrl = ogImageAltMatch[1];
+          }
+        }
       }
 
+      debugLog(`Snipd plugin: Final YouTube data - channel: ${channelName}, url: ${channelUrl}, thumb: ${thumbnailUrl ? 'found' : 'not found'}`);
       return { channelName, channelUrl, thumbnailUrl };
     } catch (e) {
       debugLog('Snipd plugin: failed to fetch YouTube video data', e);
@@ -1093,31 +1083,52 @@ export default class SnipdPlugin extends Plugin {
     try {
       // Search YouTube for the video title
       const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(title)}`;
+      debugLog(`Snipd plugin: Searching YouTube: ${searchUrl}`);
       const response = await requestUrl({ url: searchUrl });
       const html = response.text;
 
-      // Extract the first video result's data from the initial data JSON in the HTML
-      // ytInitialData is usually present in a script tag
-      const ytInitialDataMatch = html.match(/var ytInitialData = (\{.*?\});/);
+      // Extract ytInitialData which contains search results
+      // The JSON can be very large, so we need a more robust extraction
+      const ytInitialDataMatch = html.match(/var ytInitialData\s*=\s*(\{.+?\});\s*<\/script>/s);
       if (ytInitialDataMatch && ytInitialDataMatch[1]) {
-        const data = JSON.parse(ytInitialDataMatch[1]);
-        
-        // Navigate through the JSON structure to find the first video renderer
-        const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
-        const firstItem = contents?.[0]?.itemSectionRenderer?.contents?.[0]?.videoRenderer;
+        try {
+          const data = JSON.parse(ytInitialDataMatch[1]);
+          
+          // Navigate through the JSON structure to find video results
+          const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+          
+          if (contents) {
+            // Find the first video renderer in the results
+            for (const section of contents) {
+              const items = section.itemSectionRenderer?.contents;
+              if (items) {
+                for (const item of items) {
+                  if (item.videoRenderer) {
+                    const videoRenderer = item.videoRenderer;
+                    const channelName = videoRenderer.ownerText?.runs?.[0]?.text || null;
+                    const channelId = videoRenderer.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId;
+                    const channelUrl = channelId ? `https://www.youtube.com/channel/${channelId}` : null;
+                    const videoId = videoRenderer.videoId;
+                    const videoUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : null;
+                    // Get highest quality thumbnail
+                    const thumbnails = videoRenderer.thumbnail?.thumbnails;
+                    const thumbnailUrl = thumbnails && thumbnails.length > 0 
+                      ? thumbnails[thumbnails.length - 1].url 
+                      : null;
 
-        if (firstItem) {
-           const channelName = firstItem.ownerText?.runs?.[0]?.text || null;
-           const channelId = firstItem.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId;
-           const channelUrl = channelId ? `https://www.youtube.com/channel/${channelId}` : null;
-           const videoId = firstItem.videoId;
-           const videoUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : null;
-           const thumbnailUrl = firstItem.thumbnail?.thumbnails?.[0]?.url || null;
-
-           return { channelName, channelUrl, videoUrl, thumbnailUrl };
+                    debugLog(`Snipd plugin: Found video in search - channel: ${channelName}, videoId: ${videoId}`);
+                    return { channelName, channelUrl, videoUrl, thumbnailUrl };
+                  }
+                }
+              }
+            }
+          }
+        } catch (parseError) {
+          debugLog(`Snipd plugin: Failed to parse ytInitialData`, parseError);
         }
       }
 
+      debugLog(`Snipd plugin: No video found in YouTube search results`);
       return { channelName: null, channelUrl: null, videoUrl: null, thumbnailUrl: null };
     } catch (e) {
       debugLog('Snipd plugin: failed to search YouTube by title', e);
