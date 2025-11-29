@@ -808,7 +808,118 @@ export default class SnipdPlugin extends Plugin {
       }
       const episodeName = generateEpisodeFileName(episodeData, episodeId, this.settings);
       const showId = episodeData?.show_id;
-      const showName = showId && showsData[showId] ? showsData[showId].name : 'Unknown Show';
+      let showName = showId && showsData[showId] ? showsData[showId].name : 'Unknown Show';
+
+      // Special handling for YouTube uploads: try to use the channel name (Host/Owner) instead of "Your uploads"
+      const originalShowName = showName;
+      if (showName === 'Your uploads') {
+        let channelName = '';
+        
+        // 1. Try to extract from the note content (relies on "Owner / Host" line in template)
+        // We check full content if available.
+        if (fileData.full) {
+            const ownerMatch = fileData.full.match(/- Owner \/ Host: (.*)/);
+            if (ownerMatch && ownerMatch[1]) {
+            const potentialChannelName = ownerMatch[1].trim();
+            if (potentialChannelName) {
+                channelName = potentialChannelName;
+            }
+            }
+        }
+
+        // 2. Fetch extended data from YouTube if needed
+        if (episodeData?.episode_url && episodeData.episode_url.includes('youtube.com')) {
+           const { channelName: fetchedName, channelUrl, thumbnailUrl } = await this.fetchYouTubeVideoData(episodeData.episode_url);
+           
+           if (fetchedName) {
+             channelName = fetchedName;
+           }
+
+           // Update showName for folder structure
+           if (channelName) {
+             showName = channelName;
+           }
+
+           // MODIFY CONTENT: Update metadata fields and add new URLs
+           // Only possible if we have full content to modify.
+           if (fileData.full) {
+             if (channelName) {
+                // Update "Show" field
+                fileData.full = fileData.full.replace(
+                /^- Show: .*$/m,
+                `- Show: ${channelName}`
+                );
+                // Update "Owner / Host" field
+                fileData.full = fileData.full.replace(
+                /^- Owner \/ Host: .*$/m,
+                `- Owner / Host: ${channelName}`
+                );
+             }
+             
+             // Append original URLs and Image URL to metadata section
+             const insertionPointRegex = /(- Episode URL:.*$)/m;
+             const match = fileData.full.match(insertionPointRegex);
+             
+             if (match) {
+                const insertionPoint = match[0];
+                let extraMetadata = '';
+                
+                // Helper to check if line exists in content (simple check to avoid duplication)
+                // We check against the proposed line.
+                const contentIncludes = (text: string) => fileData.full.includes(text);
+
+                if (channelUrl && !contentIncludes(`- Original Show URL: ${channelUrl}`)) {
+                    extraMetadata += `\n- Original Show URL: ${channelUrl}`;
+                }
+                if (episodeData.episode_url && !contentIncludes(`- Original Episode URL: ${episodeData.episode_url}`)) {
+                    extraMetadata += `\n- Original Episode URL: ${episodeData.episode_url}`;
+                }
+                if (thumbnailUrl && !contentIncludes(`- Image URL: ${thumbnailUrl}`)) {
+                    extraMetadata += `\n- Image URL: ${thumbnailUrl}`;
+                }
+                
+                if (extraMetadata) {
+                    fileData.full = fileData.full.replace(insertionPoint, insertionPoint + extraMetadata);
+                }
+             }
+           }
+        } else if (channelName) {
+            // Fallback: If we only have channel name from extraction but no YouTube fetch
+            showName = channelName;
+        }
+      }
+
+      // Handle File Move if show name changed (e.g. "Your uploads" -> "Channel Name")
+      if (originalShowName === 'Your uploads' && showName !== 'Your uploads') {
+          const sanitizedEpisodeName = sanitizeFileName(episodeName);
+          const sanitizedOldShow = sanitizeFileName('Your uploads');
+          const sanitizedNewShow = sanitizeFileName(showName);
+          
+          const oldPath = normalizePath(`${this.getPageFolder()}/${sanitizedOldShow}/${sanitizedEpisodeName}.md`);
+          const newPath = normalizePath(`${this.getPageFolder()}/${sanitizedNewShow}/${sanitizedEpisodeName}.md`);
+          
+          if (await this.fs.exists(oldPath) && !(await this.fs.exists(newPath))) {
+              try {
+                await createDirForFile(newPath, this.fs);
+                await this.fs.rename(oldPath, newPath);
+                debugLog(`Snipd plugin: moved file from ${oldPath} to ${newPath}`);
+                
+                // Migrate metadata settings
+                if (this.settings.fileHashMap[oldPath]) {
+                    this.settings.fileHashMap[newPath] = this.settings.fileHashMap[oldPath];
+                    delete this.settings.fileHashMap[oldPath];
+                }
+                if (this.settings.appendOnlyFiles[oldPath]) {
+                    this.settings.appendOnlyFiles[newPath] = this.settings.appendOnlyFiles[oldPath];
+                    delete this.settings.appendOnlyFiles[oldPath];
+                }
+                // We should save settings to persist the migration immediately
+                await this.saveSettings(); 
+              } catch (e) {
+                  debugLog(`Snipd plugin: failed to move file from ${oldPath} to ${newPath}`, e);
+              }
+          }
+      }
 
       await this.syncFile(
         fileData.full,
@@ -847,6 +958,64 @@ export default class SnipdPlugin extends Plugin {
     const updatedFrontmatter = frontmatterContent.replace(snipsCountRegex, `snips_count: ${snipsCount}`);
 
     return `---\n${updatedFrontmatter}\n---\n${restOfContent}`;
+  }
+
+  private async fetchYouTubeVideoData(url: string): Promise<{
+    channelName: string | null;
+    channelUrl: string | null;
+    thumbnailUrl: string | null;
+  }> {
+    try {
+      const response = await requestUrl({ url: url });
+      const html = response.text;
+      
+      let channelName: string | null = null;
+      let channelUrl: string | null = null;
+      let thumbnailUrl: string | null = null;
+
+      // 1. Channel Name
+      const ownerChannelNameMatch = html.match(/"ownerChannelName":"(.*?)"/);
+      if (ownerChannelNameMatch && ownerChannelNameMatch[1]) {
+        channelName = ownerChannelNameMatch[1];
+      } else {
+        const authorMatch = html.match(/"videoDetails":\{.*?"author":"(.*?)",/);
+        if (authorMatch && authorMatch[1]) {
+          channelName = authorMatch[1];
+        }
+      }
+
+      // 2. Channel URL
+      // Try finding canonical channel url first
+      const channelUrlMatch = html.match(/"ownerProfileUrl":"(.*?)"/);
+      if (channelUrlMatch && channelUrlMatch[1]) {
+        channelUrl = channelUrlMatch[1];
+      } else {
+        // Fallback to channelId to construct URL
+        const channelIdMatch = html.match(/"externalChannelId":"(.*?)"/);
+        if (channelIdMatch && channelIdMatch[1]) {
+          channelUrl = `https://www.youtube.com/channel/${channelIdMatch[1]}`;
+        }
+      }
+
+      // 3. Thumbnail URL
+      // Look for the first high-res thumbnail in videoDetails
+      const thumbnailMatch = html.match(/"thumbnail":\{"thumbnails":\[.*?\{"url":"(.*?)".*?\]/);
+      // or simpler match for just any URL inside thumbnails array structure
+      if (thumbnailMatch && thumbnailMatch[1]) {
+        thumbnailUrl = thumbnailMatch[1];
+      } else {
+         // Fallback regex for og:image or similar if needed, but videoDetails usually has it.
+         const ogImageMatch = html.match(/<meta property="og:image" content="(.*?)">/);
+         if (ogImageMatch && ogImageMatch[1]) {
+            thumbnailUrl = ogImageMatch[1];
+         }
+      }
+
+      return { channelName, channelUrl, thumbnailUrl };
+    } catch (e) {
+      debugLog('Snipd plugin: failed to fetch YouTube video data', e);
+      return { channelName: null, channelUrl: null, thumbnailUrl: null };
+    }
   }
 
   async syncFile(
