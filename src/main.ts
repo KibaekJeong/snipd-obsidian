@@ -873,13 +873,23 @@ export default class SnipdPlugin extends Plugin {
 
         // MODIFY CONTENT with whatever data we found
         if (fileData.full && channelName) {
-            // Update "Show" field
+            // Update YAML frontmatter properties
+            const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
+            fileData.full = this.updateYouTubeFrontmatter(
+                fileData.full, 
+                channelName, 
+                originalEpUrl || null, 
+                fetchedChannelUrl, 
+                fetchedThumbnailUrl
+            );
+            
+            // Update "Show" field in body
             fileData.full = fileData.full.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
-            // Update "Owner / Host" field
+            // Update "Owner / Host" field in body
             fileData.full = fileData.full.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
         }
 
-        // Append original URLs and Image URL to metadata section
+        // Append original URLs and Image URL to metadata section in body
         if (fileData.full && (fetchedChannelUrl || fetchedThumbnailUrl || fetchedVideoUrl || episodeData?.episode_url)) {
             const insertionPointRegex = /(- Episode URL:.*$)/m;
             const match = fileData.full.match(insertionPointRegex);
@@ -979,6 +989,73 @@ export default class SnipdPlugin extends Plugin {
     const updatedFrontmatter = frontmatterContent.replace(snipsCountRegex, `snips_count: ${snipsCount}`);
 
     return `---\n${updatedFrontmatter}\n---\n${restOfContent}`;
+  }
+
+  private updateYouTubeFrontmatter(
+    content: string, 
+    channelName: string | null, 
+    youtubeEpisodeUrl: string | null, 
+    youtubeChannelUrl: string | null, 
+    thumbnailUrl: string | null
+  ): string {
+    const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*(\n|$)/;
+    const match = content.match(frontmatterRegex);
+
+    if (!match) {
+      // No frontmatter exists, create one
+      let newFrontmatter = '---\n';
+      if (channelName) {
+        newFrontmatter += `show_title: "${channelName}"\n`;
+      }
+      if (youtubeEpisodeUrl) {
+        newFrontmatter += `youtube_episode_url: "${youtubeEpisodeUrl}"\n`;
+      }
+      if (youtubeChannelUrl) {
+        newFrontmatter += `youtube_channel_url: "${youtubeChannelUrl}"\n`;
+      }
+      if (thumbnailUrl) {
+        newFrontmatter += `cover: "${thumbnailUrl}"\n`;
+      }
+      newFrontmatter += '---\n';
+      return newFrontmatter + content;
+    }
+
+    let frontmatterContent = match[1];
+    const restOfContent = content.slice(match[0].length);
+
+    // Helper to update or add a property
+    const updateOrAddProperty = (fm: string, key: string, value: string): string => {
+      const keyRegex = new RegExp(`^${key}:.*$`, 'm');
+      // Escape quotes in value
+      const escapedValue = value.replace(/"/g, '\\"');
+      if (keyRegex.test(fm)) {
+        return fm.replace(keyRegex, `${key}: "${escapedValue}"`);
+      } else {
+        return fm.trimEnd() + `\n${key}: "${escapedValue}"`;
+      }
+    };
+
+    // Update show_title
+    if (channelName) {
+      frontmatterContent = updateOrAddProperty(frontmatterContent, 'show_title', channelName);
+    }
+
+    // Add youtube_episode_url
+    if (youtubeEpisodeUrl) {
+      frontmatterContent = updateOrAddProperty(frontmatterContent, 'youtube_episode_url', youtubeEpisodeUrl);
+    }
+
+    // Add youtube_channel_url
+    if (youtubeChannelUrl) {
+      frontmatterContent = updateOrAddProperty(frontmatterContent, 'youtube_channel_url', youtubeChannelUrl);
+    }
+
+    // Update cover with thumbnail URL
+    if (thumbnailUrl) {
+      frontmatterContent = updateOrAddProperty(frontmatterContent, 'cover', thumbnailUrl);
+    }
+
+    return `---\n${frontmatterContent}\n---\n${restOfContent}`;
   }
 
   private async fetchYouTubeVideoData(url: string): Promise<{
@@ -1526,12 +1603,15 @@ export default class SnipdPlugin extends Plugin {
         // Update content
         let updatedContent = content;
         
-        // Update Show field
+        // Update YAML frontmatter properties
+        updatedContent = this.updateYouTubeFrontmatter(updatedContent, channelName, youtubeUrl || null, channelUrl, thumbnailUrl);
+        
+        // Update Show field in body
         updatedContent = updatedContent.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
-        // Update Owner / Host field
+        // Update Owner / Host field in body
         updatedContent = updatedContent.replace(/^- Owner \/ Host: .*$/m, `- Owner / Host: ${channelName}`);
 
-        // Add extra metadata if not present
+        // Add extra metadata if not present in body
         const insertionPointRegex = /(- Episode URL:.*$)/m;
         const match = updatedContent.match(insertionPointRegex);
         if (match) {
