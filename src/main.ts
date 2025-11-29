@@ -817,6 +817,7 @@ export default class SnipdPlugin extends Plugin {
         let fetchedChannelUrl: string | null = null;
         let fetchedThumbnailUrl: string | null = null;
         let fetchedVideoUrl: string | null = null;
+        let actualYouTubeUrl: string | null = null;
         
         // 1. Try to extract channel name from the note content (relies on "Owner / Host" line in template)
         if (fileData.full) {
@@ -827,15 +828,25 @@ export default class SnipdPlugin extends Plugin {
                     channelName = potentialChannelName;
                 }
             }
+            
+            // Try to extract actual YouTube URL from content
+            const youtubeUrlInContent = fileData.full.match(/https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/);
+            if (youtubeUrlInContent) {
+                actualYouTubeUrl = youtubeUrlInContent[0];
+            }
         }
 
         // 2. Fetch extended data from YouTube
+        // Check if episode_url is a YouTube URL
         const isYouTubeUrl = episodeData?.episode_url && 
             (episodeData.episode_url.includes('youtube.com') || episodeData.episode_url.includes('youtu.be'));
         
-        if (isYouTubeUrl) {
-            debugLog(`Snipd plugin: Fetching YouTube data for URL: ${episodeData.episode_url}`);
-            const data = await this.fetchYouTubeVideoData(episodeData.episode_url);
+        // Use episode_url if it's a YouTube URL, otherwise use the one extracted from content
+        const youtubeUrlToFetch = isYouTubeUrl ? episodeData.episode_url : actualYouTubeUrl;
+        
+        if (youtubeUrlToFetch) {
+            debugLog(`Snipd plugin: Fetching YouTube data for URL: ${youtubeUrlToFetch}`);
+            const data = await this.fetchYouTubeVideoData(youtubeUrlToFetch);
             debugLog(`Snipd plugin: YouTube fetch result:`, data);
             
             if (data.channelName) {
@@ -843,6 +854,11 @@ export default class SnipdPlugin extends Plugin {
             }
             fetchedChannelUrl = data.channelUrl;
             fetchedThumbnailUrl = data.thumbnailUrl;
+            
+            // Set the actual YouTube URL (this is the real YouTube watch URL)
+            if (isYouTubeUrl) {
+                actualYouTubeUrl = episodeData.episode_url;
+            }
         }
 
         // 3. Fallback to Search by Title if URL fetch failed to get channel name
@@ -862,6 +878,10 @@ export default class SnipdPlugin extends Plugin {
             }
             if (searchData.videoUrl) {
                 fetchedVideoUrl = searchData.videoUrl;
+                // Use search result URL if we don't have an actual YouTube URL yet
+                if (!actualYouTubeUrl) {
+                    actualYouTubeUrl = searchData.videoUrl;
+                }
             }
         }
 
@@ -871,14 +891,16 @@ export default class SnipdPlugin extends Plugin {
             debugLog(`Snipd plugin: Using channel name for folder: ${showName}`);
         }
 
+        // Determine the final YouTube episode URL to use
+        const youtubeEpisodeUrl = actualYouTubeUrl || fetchedVideoUrl;
+
         // MODIFY CONTENT with whatever data we found
         if (fileData.full && channelName) {
             // Update YAML frontmatter properties
-            const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
             fileData.full = this.updateYouTubeFrontmatter(
                 fileData.full, 
                 channelName, 
-                originalEpUrl || null, 
+                youtubeEpisodeUrl, 
                 fetchedChannelUrl, 
                 fetchedThumbnailUrl
             );
@@ -890,7 +912,7 @@ export default class SnipdPlugin extends Plugin {
         }
 
         // Append original URLs and Image URL to metadata section in body
-        if (fileData.full && (fetchedChannelUrl || fetchedThumbnailUrl || fetchedVideoUrl || episodeData?.episode_url)) {
+        if (fileData.full && (fetchedChannelUrl || fetchedThumbnailUrl || youtubeEpisodeUrl)) {
             const insertionPointRegex = /(- Episode URL:.*$)/m;
             const match = fileData.full.match(insertionPointRegex);
             
@@ -903,9 +925,8 @@ export default class SnipdPlugin extends Plugin {
                     extraMetadata += `\n- Original Show URL: ${fetchedChannelUrl}`;
                 }
                 
-                const originalEpUrl = episodeData?.episode_url || fetchedVideoUrl;
-                if (originalEpUrl && !contentIncludes(`- Original Episode URL:`)) {
-                    extraMetadata += `\n- Original Episode URL: ${originalEpUrl}`;
+                if (youtubeEpisodeUrl && !contentIncludes(`- Original Episode URL:`)) {
+                    extraMetadata += `\n- Original Episode URL: ${youtubeEpisodeUrl}`;
                 }
                 
                 if (fetchedThumbnailUrl && !contentIncludes(`- Image URL:`)) {
@@ -1014,7 +1035,7 @@ export default class SnipdPlugin extends Plugin {
         newFrontmatter += `youtube_channel_url: "${youtubeChannelUrl}"\n`;
       }
       if (thumbnailUrl) {
-        newFrontmatter += `cover: "${thumbnailUrl}"\n`;
+        newFrontmatter += `image_url: "${thumbnailUrl}"\n`;
       }
       newFrontmatter += '---\n';
       return newFrontmatter + content;
@@ -1035,6 +1056,12 @@ export default class SnipdPlugin extends Plugin {
       }
     };
 
+    // Helper to remove a property
+    const removeProperty = (fm: string, key: string): string => {
+      const keyRegex = new RegExp(`^${key}:.*$\\n?`, 'm');
+      return fm.replace(keyRegex, '');
+    };
+
     // Update show_title
     if (channelName) {
       frontmatterContent = updateOrAddProperty(frontmatterContent, 'show_title', channelName);
@@ -1050,9 +1077,10 @@ export default class SnipdPlugin extends Plugin {
       frontmatterContent = updateOrAddProperty(frontmatterContent, 'youtube_channel_url', youtubeChannelUrl);
     }
 
-    // Update cover with thumbnail URL
+    // Update image_url with thumbnail URL (and remove cover if it exists)
     if (thumbnailUrl) {
-      frontmatterContent = updateOrAddProperty(frontmatterContent, 'cover', thumbnailUrl);
+      frontmatterContent = removeProperty(frontmatterContent, 'cover');
+      frontmatterContent = updateOrAddProperty(frontmatterContent, 'image_url', thumbnailUrl);
     }
 
     return `---\n${frontmatterContent}\n---\n${restOfContent}`;
@@ -1074,7 +1102,7 @@ export default class SnipdPlugin extends Plugin {
       let thumbnailUrl: string | null = null;
 
       // Method 1: Try to find ytInitialPlayerResponse which contains video details
-      const playerResponseMatch = html.match(/var ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      const playerResponseMatch = html.match(/var ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\});/);
       if (playerResponseMatch && playerResponseMatch[1]) {
         try {
           const playerData = JSON.parse(playerResponseMatch[1]);
@@ -1166,7 +1194,7 @@ export default class SnipdPlugin extends Plugin {
 
       // Extract ytInitialData which contains search results
       // The JSON can be very large, so we need a more robust extraction
-      const ytInitialDataMatch = html.match(/var ytInitialData\s*=\s*(\{.+?\});\s*<\/script>/s);
+      const ytInitialDataMatch = html.match(/var ytInitialData\s*=\s*(\{[\s\S]+?\});\s*<\/script>/);
       if (ytInitialDataMatch && ytInitialDataMatch[1]) {
         try {
           const data = JSON.parse(ytInitialDataMatch[1]);
@@ -1562,11 +1590,14 @@ export default class SnipdPlugin extends Plugin {
       try {
         const content = await this.app.vault.adapter.read(filePath);
         
-        // Try to find YouTube URL in the content
-        const youtubeUrlMatch = content.match(/Episode URL:.*?(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)[^\s\)]+)/);
-        const originalEpUrlMatch = content.match(/Original Episode URL:\s*(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)[^\s\)]+)/);
+        // Try to find actual YouTube URL in the content (youtube.com/watch or youtu.be)
+        // First check if there's already an "Original Episode URL" with YouTube
+        const originalEpUrlMatch = content.match(/Original Episode URL:\s*(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[^\s\)]+)/);
+        // Then check for any YouTube watch URL in the content
+        const youtubeWatchUrlMatch = content.match(/https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]+)/);
         
-        const youtubeUrl = originalEpUrlMatch?.[1] || youtubeUrlMatch?.[1];
+        // Use the original episode URL if it's a YouTube URL, otherwise use any YouTube URL found
+        const youtubeUrl = originalEpUrlMatch?.[1] || (youtubeWatchUrlMatch ? youtubeWatchUrlMatch[0] : null);
         
         // Also try to get episode title from content
         const titleMatch = content.match(/^#\s+(.+)$/m);
@@ -1575,10 +1606,11 @@ export default class SnipdPlugin extends Plugin {
         let channelName: string | null = null;
         let channelUrl: string | null = null;
         let thumbnailUrl: string | null = null;
+        let fetchedVideoUrl: string | null = null;
 
         // Try to fetch YouTube data
         if (youtubeUrl) {
-          debugLog(`Snipd plugin: Migrating file ${filePath}, found URL: ${youtubeUrl}`);
+          debugLog(`Snipd plugin: Migrating file ${filePath}, found YouTube URL: ${youtubeUrl}`);
           const data = await this.fetchYouTubeVideoData(youtubeUrl);
           channelName = data.channelName;
           channelUrl = data.channelUrl;
@@ -1592,6 +1624,7 @@ export default class SnipdPlugin extends Plugin {
           channelName = searchData.channelName;
           if (!channelUrl) channelUrl = searchData.channelUrl;
           if (!thumbnailUrl) thumbnailUrl = searchData.thumbnailUrl;
+          if (searchData.videoUrl) fetchedVideoUrl = searchData.videoUrl;
         }
 
         if (!channelName) {
@@ -1600,11 +1633,14 @@ export default class SnipdPlugin extends Plugin {
           continue;
         }
 
+        // Determine the final YouTube episode URL
+        const finalYouTubeUrl = youtubeUrl || fetchedVideoUrl;
+
         // Update content
         let updatedContent = content;
         
         // Update YAML frontmatter properties
-        updatedContent = this.updateYouTubeFrontmatter(updatedContent, channelName, youtubeUrl || null, channelUrl, thumbnailUrl);
+        updatedContent = this.updateYouTubeFrontmatter(updatedContent, channelName, finalYouTubeUrl, channelUrl, thumbnailUrl);
         
         // Update Show field in body
         updatedContent = updatedContent.replace(/^- Show: .*$/m, `- Show: ${channelName}`);
